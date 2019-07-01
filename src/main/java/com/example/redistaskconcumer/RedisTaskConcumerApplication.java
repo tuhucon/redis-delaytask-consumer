@@ -13,6 +13,8 @@ import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
+import java.util.List;
+
 @SpringBootApplication
 public class RedisTaskConcumerApplication implements CommandLineRunner {
 
@@ -34,18 +36,25 @@ public class RedisTaskConcumerApplication implements CommandLineRunner {
         Channel channel = rabbitConnection.createChannel();
 
         String queueName = "delay.q1";
+        String redisLockName = "zorder-lock";
 
         while (true) {
-            ScoredValue<String> value = commands.zpopmin(zorderName);
-            if (value.hasValue() == true) {
-                Long score = Double.valueOf(value.getScore()).longValue();
-                if (score >= System.nanoTime()) {
-                    //readd task to redis
-                    commands.zadd(zorderName, value.getScore(), value.getValue());
-                } else {
-                    //public to rabbitmq
-                    channel.basicPublish("", queueName, null, Longs.toByteArray(score));
+            boolean hasLock = commands.setnx(redisLockName, redisLockName);
+            if (hasLock) {
+                List<ScoredValue<String>> values = commands.zrangeWithScores(zorderName, 0, 0);
+                if (values.size() > 0) {
+                    Long score = Double.valueOf(values.get(0).getScore()).longValue();
+                    if (score <= System.nanoTime()) {
+                        //public to rabbitmq
+                        channel.basicPublish("", queueName, null, Longs.toByteArray(score));
+                        commands.zrem(zorderName, values.get(0).getValue());
+                        commands.del(redisLockName);
+                        continue;
+                    }
                 }
+                //release lock and sleep
+                commands.del(redisLockName);
+                Thread.sleep(1L);
             } else {
                 Thread.sleep(1L);
             }
